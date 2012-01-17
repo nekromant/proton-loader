@@ -1,0 +1,210 @@
+#!/usr/bin/gawk -f
+#
+
+#
+# html-parser - parser HTML input an print reformatted.
+#
+
+
+function skipws(string) {
+	sub(/^[ \t\r\n]+/, "", string);
+	return (string);
+	}
+
+
+function decode(string,   c, i, n, x, y, z) {
+	if (mapinit == 0) {
+		n = split(MAPLIST, x, " ");
+		for (i=1; i<=n; i++) {
+			split(x[i], y, ":");
+			cmap[y[2]] = y[1];
+			}
+		}
+
+	z = "";
+	while (match(string, /&([a-z][a-z0-9]*|#[0-9]+);/, x) > 0) {
+		z = z substr(string, 1, RSTART - 1);
+		c = x[1];
+		if (substr(c, 1, 1) == "#")
+			z = z sprintf ("%c", substr(c, 2) + 0);
+		else if (c in cmap)
+			z = z cmap[c];
+		else
+			z = z "`";
+
+		string = substr(string, RSTART + RLENGTH);
+		}
+
+	z = z string;
+	return (z);
+	}
+
+
+function cgidecode(str,   k, x, result) {
+	hex = "123456789ABCDEF";
+	result = "";
+	gsub(/+/, " ", str);
+	while ((k = index(str, "%")) > 0) {
+		result = result substr(str, 1, k-1);
+		str = substr(str, k+1);
+		x = index(hex, substr(str, 1, 1)) * 16 + index(hex, substr(str, 2, 1));
+		result = result sprintf ("%c", x);
+		str = substr(str, 3);
+		}
+
+	result = result str;
+	return (result);
+	}
+
+function getattrval(val,   c, i, n, x, y) {
+	if (mapinit == 0) {
+		n = split(MAPLIST, x, " ");
+		for (i=1; i<=n; i++) {
+			split(x[i], y, ":");
+			cmap[y[2]] = y[1];
+			}
+		}
+
+	if (val == "")
+		val = "";
+	else if ((c = substr(val, 1, 1)) == "'")
+		gsub(/^'|'$/, "", val);
+	else if (c == "\"");
+		gsub(/^"|"$/, "", val);
+
+	val = cgidecode(val);
+	return (val);
+	}
+
+
+function parsetag(tag,   type, a, v, x) {
+	type = "TAG";
+	if (substr(tag, 1, 2) == "<?") {
+		type = "?TAG";
+		gsub(/(^<\?|\?>$)/, "", tag);
+		}
+	else if (substr(tag, 1, 2) == "</") {
+		type = "/TAG";
+		gsub(/(^<\/|>$)/, "", tag);
+		}
+	else if (tag ~ /\/>$/) {
+		type = "+TAG";
+		gsub(/(^<|\/>$)/, "", tag);
+		}
+	else
+		gsub(/(^<|>$)/, "", tag);
+
+
+	tag = skipws(tag);
+	if (match(tag, /\/?[a-z][a-z0-9]*/) > 0) {
+		attr[".NAME."] = toupper(substr(tag, RSTART, RLENGTH));
+		tag = substr(tag, RSTART + RLENGTH);
+		}
+
+	while ((tag = skipws(tag)) != "") {
+		if (match(tag, /^([a-z][a-z0-9]*)([ \t]*=(|"[^"]*"|'[^']*'|[^'" \t][^ \t]*))?/, x) == 0) {
+			attr[".UNPARSED."] = tag;
+			break;
+			}
+		else {
+			a = toupper(x[1]);
+			v = x[3];
+			attr[a] = v;
+			tag = skipws(substr(tag, RSTART + RLENGTH));
+			}
+		}
+
+	return (type);
+	}
+
+function getnext() {
+	delete attr;
+	if (INPUT == "")
+		return ("EOF");
+	else if ((k = match(INPUT, /<[^>]+>/)) != 1) {
+		if (k == 0)
+			k = length(INPUT) + 1;
+
+		attr[".TEXT."] = substr(INPUT, 1, k - 1);
+		INPUT = substr(INPUT, k);
+		return ("TEXT");
+		}
+	else {
+		attr[".TAG."] = tag = substr(INPUT, 1, RLENGTH);
+		INPUT = substr(INPUT, RLENGTH + 1);
+		p = parsetag(tag);
+		return (p);
+		}
+
+	return ("ERROR");
+	}
+
+BEGIN {
+	program = "html-parser";
+	STDERR = "/dev/stderr";
+	IGNORECASE = 1;
+
+	MAPLIST = "<:lt &:amp >:gt";
+
+	#
+	# First we read the whole input ...
+	#
+	
+	while (getline > 0)
+		INPUT = INPUT $0 "\n";
+
+	#
+	# ... from which we get token (which are either a tag or text)
+	# until the end of file.
+	#
+
+	while ((type = getnext()) != "EOF") {
+		if (type == "TEXT") {
+			text = attr[".TEXT."];
+			gsub(/\n/, " ", text);
+			printf ("TEXT\t%s\n", decode(text));
+			}
+
+		#
+		# TAG is a normal HTML tag, +TAG the XML `<TAG .../>'
+		# and ?TAG is a `<?XML ... ?>' ...
+		#
+
+		else if (type == "TAG"  ||  type == "+TAG"  ||  type == "?TAG") {
+			printf ("%s\t%s\t%s\n", type, attr[".NAME."], attr[".TAG."]);
+			neednewline = 0;
+			for (a in attr) {
+				if (substr(a, 1, 1) != ".") {
+					if ((v = attr[a]) == "")
+						printf ("\t%s", a);
+					else
+						printf ("\t%s=%s", a, getattrval(v));
+
+					neednewline = 1;
+					}
+				}
+
+			if ((v = attr[".UNPARSED."]) != "")
+				printf ("\t** %s\n", v);
+
+			if (neednewline != 0)
+				printf ("\n");
+			}
+
+		#
+		# ... and finally /TAG which is the closing part of
+		# an HTML tag.
+		#
+
+		else if (type == "/TAG")
+			printf ("/TAG\t%s\n", attr[".NAME."]);
+		else {
+			printf ("%s: parse error, type= %s\n", program, type) >>STDERR;
+			exit (1);
+			}
+
+		}
+
+	exit (0);
+	}
+
